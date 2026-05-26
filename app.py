@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import os
 import re
+import urllib.parse
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from match_events import (
     ALL_MATCHES,
@@ -265,6 +267,21 @@ _CSS_BASE = """
     letter-spacing: 0.08em;
   }
 
+  .sv-tweet-btn {
+    display: block;
+    text-align: center;
+    background: rgba(29, 161, 242, 0.15);
+    color: #1da1f2 !important;
+    border: 1px solid #1da1f2;
+    padding: 0.6rem 1.2rem;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none !important;
+    font-size: 0.95rem;
+  }
+  .sv-tweet-btn:hover { background: rgba(29, 161, 242, 0.25); }
+
   div[data-testid="stButton"] > button {
     background: linear-gradient(180deg, #238636 0%, #196c2e 100%);
     color: #fff;
@@ -433,63 +450,31 @@ def _init_poll(key: str) -> None:
         st.session_state[key] = {"agree": 0, "disagree": 0, "user_vote": None}
 
 
-def _render_poll(match_id: int, sub_idx: int) -> None:
-    key = _poll_key(match_id, sub_idx)
-    _init_poll(key)
-    poll = st.session_state[key]
-
-    st.markdown("#### Fan poll")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("👍 Agree", key=f"agree_{key}", use_container_width=True):
-            if poll["user_vote"] is None:
-                poll["agree"] += 1
-                poll["user_vote"] = "agree"
-                st.rerun()
-    with c2:
-        if st.button(
-            "👎 Disagree",
-            key=f"disagree_{key}",
-            type="secondary",
-            use_container_width=True,
-        ):
-            if poll["user_vote"] is None:
-                poll["disagree"] += 1
-                poll["user_vote"] = "disagree"
-                st.rerun()
-
-    total = poll["agree"] + poll["disagree"]
-    if total == 0:
-        st.caption("Be the first to vote on this verdict.")
-        return
-
-    agree_pct = int(round(100 * poll["agree"] / total))
-    st.markdown(
-        f"""
-        <div class="sv-poll-bar">
-          <div class="sv-poll-agree" style="width:{agree_pct}%"></div>
-          <div class="sv-poll-disagree" style="width:{100 - agree_pct}%"></div>
-        </div>
-        <p style="color:#8b949e;font-size:0.88rem;margin:0;">
-          <span style="color:#00ff87;">{agree_pct}% agree</span>
-          · {total} vote{"s" if total != 1 else ""}
-        </p>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def _render_inline_verdict(match: dict, match_id: int, sub_idx: int, data: dict) -> None:
     sub = data["sub"]
     verdict = data["verdict"]
     color = VERDICT_COLORS.get(verdict, "#00ff87")
     after = what_happened_after(match, sub)
 
-    st.markdown('<div class="sv-inline-verdict">', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="sv-mascot">{MASCOT[verdict]}</div>',
-        unsafe_allow_html=True,
+    tweet_text = (
+        f"🔴 {verdict.upper()} — {sub['team']['shortName']} pulled "
+        f"{sub['playerOut']['name']} ({sub['positionOut']}) for "
+        f"{sub['playerIn']['name']} ({sub['positionIn']}) at {sub['minute']}' "
+        f"({sub['scoreline']}). #SubVerdict #PremierLeague"
     )
+    tweet_url = "https://twitter.com/intent/tweet?text=" + urllib.parse.quote(tweet_text)
+
+    poll_key = _poll_key(match_id, sub_idx)
+    _init_poll(poll_key)
+    poll = st.session_state[poll_key]
+    user_voted = poll["user_vote"] is not None
+
+    st.markdown('<div class="sv-inline-verdict">', unsafe_allow_html=True)
+
+    # Mascot
+    st.markdown(f'<div class="sv-mascot">{MASCOT[verdict]}</div>', unsafe_allow_html=True)
+
+    # Verdict card
     st.markdown(
         f"""
         <div class="sv-verdict">
@@ -499,16 +484,88 @@ def _render_inline_verdict(match: dict, match_id: int, sub_idx: int, data: dict)
         """,
         unsafe_allow_html=True,
     )
-    st.markdown(
-        f"""
-        <div class="sv-fact">
-          <h4>{after['icon']} What happened after</h4>
-          <p><strong>{after['headline']}</strong> — {after['detail']}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    _render_poll(match_id, sub_idx)
+
+    # Share section
+    st.markdown("#### Share this verdict")
+    st.code(tweet_text, language=None)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("📋 Copy to clipboard", key=f"copy_{poll_key}", use_container_width=True):
+            components.html(
+                f"""<script>navigator.clipboard.writeText({repr(tweet_text)});</script>""",
+                height=0,
+            )
+            st.toast("✅ Copied to clipboard!")
+    with c2:
+        st.markdown(
+            f'<a href="{tweet_url}" target="_blank" class="sv-tweet-btn">Tweet this</a>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Fan Poll
+    st.markdown("#### Fan poll")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("👍 Agree", key=f"agree_{poll_key}", use_container_width=True):
+            if poll["user_vote"] is None:
+                poll["agree"] += 1
+                poll["user_vote"] = "agree"
+                st.rerun()
+    with c2:
+        if st.button(
+            "👎 Disagree",
+            key=f"disagree_{poll_key}",
+            type="secondary",
+            use_container_width=True,
+        ):
+            if poll["user_vote"] is None:
+                poll["disagree"] += 1
+                poll["user_vote"] = "disagree"
+                st.rerun()
+
+    total = poll["agree"] + poll["disagree"]
+    if total > 0:
+        agree_pct = int(round(100 * poll["agree"] / total))
+        st.markdown(
+            f"""
+            <div class="sv-poll-bar">
+              <div class="sv-poll-agree" style="width:{agree_pct}%"></div>
+              <div class="sv-poll-disagree" style="width:{100 - agree_pct}%"></div>
+            </div>
+            <p style="color:#8b949e;font-size:0.88rem;margin:0;">
+              <span style="color:#00ff87;">{agree_pct}% agree</span>
+              · {total} vote{"s" if total != 1 else ""}
+            </p>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Be the first to vote on this verdict.")
+
+    # What happened after — revealed only after voting
+    if user_voted:
+        st.markdown(
+            """
+            <div style="margin-top:0.75rem;padding:0.6rem 1rem;
+            background:#00ff8715;border-radius:8px;color:#00ff87;
+            font-size:0.9rem;font-weight:600;">
+              You voted! Here's what actually happened...
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"""
+            <div class="sv-fact">
+              <h4>{after['icon']} What happened after</h4>
+              <p><strong>{after['headline']}</strong> — {after['detail']}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 
