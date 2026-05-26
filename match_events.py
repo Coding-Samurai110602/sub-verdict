@@ -397,6 +397,170 @@ HARDCODED_MATCH_DATA: dict[int, dict] = {
     },
 }
 
+# (positionOut, positionIn) per substitution, in listed order
+SUB_POSITIONS: dict[int, list[tuple[str, str]]] = {
+    538160: [
+        ("MID", "DEF"),
+        ("FWD", "MID"),
+        ("FWD", "DEF"),
+        ("DEF", "DEF"),
+        ("MID", "MID"),
+        ("MID", "MID"),
+        ("DEF", "DEF"),
+        ("MID", "FWD"),
+    ],
+    538157: [
+        ("DEF", "DEF"),
+        ("MID", "FWD"),
+        ("FWD", "MID"),
+        ("DEF", "DEF"),
+        ("MID", "MID"),
+        ("MID", "MID"),
+        ("MID", "MID"),
+        ("FWD", "FWD"),
+        ("FWD", "FWD"),
+        ("FWD", "FWD"),
+    ],
+    538161: [
+        ("DEF", "DEF"),
+        ("FWD", "MID"),
+        ("MID", "MID"),
+        ("DEF", "DEF"),
+        ("DEF", "MID"),
+        ("MID", "MID"),
+        ("DEF", "FWD"),
+        ("DEF", "DEF"),
+        ("FWD", "DEF"),
+        ("MID", "MID"),
+    ],
+    538159: [
+        ("FWD", "FWD"),
+        ("MID", "MID"),
+        ("MID", "FWD"),
+        ("FWD", "FWD"),
+        ("MID", "FWD"),
+        ("MID", "FWD"),
+        ("FWD", "MID"),
+        ("FWD", "MID"),
+        ("DEF", "DEF"),
+        ("DEF", "FWD"),
+    ],
+    538156: [
+        ("DEF", "FWD"),
+        ("MID", "MID"),
+        ("MID", "MID"),
+        ("FWD", "FWD"),
+        ("MID", "FWD"),
+        ("DEF", "DEF"),
+        ("MID", "MID"),
+        ("MID", "FWD"),
+        ("FWD", "MID"),
+        ("DEF", "DEF"),
+    ],
+}
+
+
+def crest_url(team_id: int) -> str:
+    return f"https://crests.football-data.org/{team_id}.png"
+
+
+def _parse_scoreline(scoreline: str) -> tuple[int, int]:
+    home, away = scoreline.split("-")
+    return int(home), int(away)
+
+
+def what_happened_after(match: dict, sub: dict) -> dict:
+    """Goals in the 15 minutes after the sub for the subbing team."""
+    minute = sub["minute"]
+    team_id = sub["team"]["id"]
+    window_end = minute + 15
+
+    goals_after = [
+        g
+        for g in match["goals"]
+        if minute < g["minute"] <= window_end
+    ]
+    team_scored = [g for g in goals_after if g["team"]["id"] == team_id]
+    opp_scored = [g for g in goals_after if g["team"]["id"] != team_id]
+
+    if team_scored and not opp_scored:
+        detail = ", ".join(f"{g['minute']}'" for g in team_scored)
+        return {
+            "type": "scored",
+            "headline": "They scored in the next 15 minutes",
+            "detail": f"Goal(s) at {detail}.",
+            "icon": "⚽",
+        }
+    if opp_scored and not team_scored:
+        detail = ", ".join(f"{g['minute']}'" for g in opp_scored)
+        return {
+            "type": "conceded",
+            "headline": "They conceded in the next 15 minutes",
+            "detail": f"Opponent goal(s) at {detail}.",
+            "icon": "😬",
+        }
+    if team_scored and opp_scored:
+        return {
+            "type": "both",
+            "headline": "End-to-end after the change",
+            "detail": "Both sides scored inside 15 minutes of the sub.",
+            "icon": "↔️",
+        }
+    return {
+        "type": "nothing",
+        "headline": "No goals in the next 15 minutes",
+        "detail": "The scoreline stayed the same through that window.",
+        "icon": "⏸️",
+    }
+
+
+def manager_rating(match: dict) -> float:
+    """Overall manager rating out of 10 from sub timings and outcomes."""
+    subs = match["substitutions"]
+    if not subs:
+        return 5.0
+
+    home_id = match["homeTeam"]["id"]
+    scores: list[float] = []
+
+    for sub in subs:
+        points = 6.0
+        minute = sub["minute"]
+        team_id = sub["team"]["id"]
+
+        if minute <= 60:
+            points += 0.4
+        elif minute >= 85:
+            points -= 0.8
+        elif minute >= 75:
+            points -= 0.4
+
+        impact = what_happened_after(match, sub)
+        if impact["type"] == "scored":
+            points += 1.1
+        elif impact["type"] == "conceded":
+            points -= 1.0
+        elif impact["type"] == "both":
+            points += 0.2
+
+        h, a = _parse_scoreline(sub["scoreline"])
+        if team_id == home_id:
+            diff = h - a
+        else:
+            diff = a - h
+        if diff < 0 and impact["type"] == "scored":
+            points += 0.5
+        if diff > 0 and impact["type"] == "conceded":
+            points -= 0.5
+
+        if minute >= 80 and sub["positionIn"] in ("FWD", "MID"):
+            points += 0.2
+
+        scores.append(points)
+
+    raw = sum(scores) / len(scores)
+    return round(min(10.0, max(1.0, raw)), 1)
+
 
 def _team_for_side(match_data: dict, side: str) -> dict:
     return match_data["homeTeam"] if side == "home" else match_data["awayTeam"]
@@ -427,14 +591,19 @@ def build_match(match_id: int) -> dict:
         for g in goal_rows
     ]
 
+    positions = SUB_POSITIONS.get(match_id, [])
+
     substitutions = []
-    for s in raw["substitutions"]:
+    for i, s in enumerate(raw["substitutions"]):
+        default_out, default_in = positions[i] if i < len(positions) else ("MID", "MID")
         substitutions.append(
             {
                 "minute": s["minute"],
                 "team": _team_for_side(raw, s["team"]),
                 "playerOut": {"name": s["playerOut"]},
                 "playerIn": {"name": s["playerIn"]},
+                "positionOut": s.get("positionOut", default_out),
+                "positionIn": s.get("positionIn", default_in),
                 "scoreline": _score_at_minute(goal_rows, s["minute"]),
             }
         )
